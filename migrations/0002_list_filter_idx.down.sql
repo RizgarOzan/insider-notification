@@ -1,0 +1,2 @@
+DROP INDEX notifications_channel_list_idx;
+DROP INDEX notifications_status_list_idx;

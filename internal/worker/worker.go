@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/sync/errgroup"
 	"golang.org/x/time/rate"
 
 	"insider-notification/internal/domain"
@@ -86,36 +85,54 @@ func (p *Pool) channelLoop(ctx context.Context, ch domain.Channel) {
 	var pausedUntil atomic.Int64 // unix nanos; set when the provider answers 429
 	log := p.log.With("channel", ch)
 
+	// One slot per send in flight. Claiming only as many rows as there are free slots, and not
+	// waiting for the whole batch, keeps a hanging provider call from holding up the rest.
+	slots := make(chan struct{}, p.cfg.Parallel)
+	var inflight sync.WaitGroup
+	defer inflight.Wait()
+
 	for ctx.Err() == nil {
 		if wait := time.Until(time.Unix(0, pausedUntil.Load())); wait > 0 {
 			sleep(ctx, wait)
 			continue
 		}
-		batch, err := p.store.Claim(ctx, ch, p.cfg.BatchSize, p.cfg.Lease)
-		if err != nil {
-			if ctx.Err() == nil {
-				log.Error("claim failed", "error", err)
-			}
-			// Rows claimed before the error already carry a lease and a counted attempt: deliver them.
-			if len(batch) == 0 {
-				sleep(ctx, p.cfg.PollInterval)
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+		want := 1
+		for want < p.cfg.BatchSize {
+			select {
+			case slots <- struct{}{}:
+				want++
 				continue
+			default:
 			}
+			break
+		}
+
+		batch, err := p.store.Claim(ctx, ch, want, p.cfg.Lease)
+		if err != nil && ctx.Err() == nil {
+			log.Error("claim failed", "error", err)
+		}
+		// Rows claimed before an error already carry a lease and a counted attempt: deliver them.
+		for i := len(batch); i < want; i++ {
+			<-slots
 		}
 		if len(batch) == 0 {
 			sleep(ctx, p.cfg.PollInterval)
 			continue
 		}
 
-		var g errgroup.Group
-		g.SetLimit(p.cfg.Parallel)
 		for _, n := range batch {
-			g.Go(func() error {
+			inflight.Add(1)
+			go func() {
+				defer inflight.Done()
+				defer func() { <-slots }()
 				p.deliver(ctx, limiter, &pausedUntil, n)
-				return nil
-			})
+			}()
 		}
-		g.Wait()
 	}
 }
 
@@ -124,7 +141,20 @@ func (p *Pool) deliver(ctx context.Context, limiter *rate.Limiter, pausedUntil *
 
 	// The limit applies to provider calls, not to claiming. If we are shutting down, give the row
 	// back with its attempt refunded; nothing was sent.
-	if err := limiter.Wait(ctx); err != nil {
+	// A 429 that came back while this row waited for its turn pauses it too.
+	err := limiter.Wait(ctx)
+	for err == nil {
+		wait := time.Until(time.Unix(0, pausedUntil.Load()))
+		if wait <= 0 {
+			break
+		}
+		sleep(ctx, wait)
+		err = ctx.Err()
+		if err == nil {
+			err = limiter.Wait(ctx)
+		}
+	}
+	if err != nil {
 		relCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		if err := p.store.Release(relCtx, n); err != nil {
@@ -162,7 +192,6 @@ func (p *Pool) deliver(ctx context.Context, limiter *rate.Limiter, pausedUntil *
 	// hiccup gets a few retries, because losing the write means the lease expires and the
 	// message is sent again.
 	var applied bool
-	var err error
 	for try := 1; try <= 4; try++ {
 		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		applied, err = p.store.Finish(writeCtx, n, res)

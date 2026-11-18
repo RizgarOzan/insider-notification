@@ -64,6 +64,9 @@ func run() error {
 		Addr:              cfg.HTTPAddr,
 		Handler:           api.New(st, log, metrics).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	workersDone := make(chan struct{})
@@ -101,7 +104,7 @@ func run() error {
 func connect(ctx context.Context, url string, log *slog.Logger) (*pgxpool.Pool, error) {
 	var lastErr error
 	for i := 0; i < 30; i++ {
-		pool, err := pgxpool.New(ctx, url)
+		pool, err := newPool(ctx, url)
 		if err == nil {
 			if err = pool.Ping(ctx); err == nil {
 				return pool, nil
@@ -117,4 +120,15 @@ func connect(ctx context.Context, url string, log *slog.Logger) (*pgxpool.Pool, 
 		}
 	}
 	return nil, lastErr
+}
+
+// newPool sizes the pool for the workers: three channels with 20 sends in flight each can all be
+// writing a result at once, and the pgx default (the CPU count) would make them queue for a connection.
+func newPool(ctx context.Context, url string) (*pgxpool.Pool, error) {
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		return nil, err
+	}
+	cfg.MaxConns = max(cfg.MaxConns, 30)
+	return pgxpool.NewWithConfig(ctx, cfg)
 }

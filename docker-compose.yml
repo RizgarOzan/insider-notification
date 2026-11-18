@@ -34,6 +34,7 @@ services:
       HTTP_ADDR: ":8080"
     ports: ["8080:8080"]
     restart: unless-stopped
+    stop_grace_period: 30s # an in-flight provider call (10s) plus writing its result
 
 volumes:
   pgdata:
