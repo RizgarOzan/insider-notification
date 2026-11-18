@@ -1,0 +1,173 @@
+openapi: 3.0.3
+info:
+  title: Notification API
+  version: 1.0.0
+  description: >
+    Queue SMS, email and push notifications and follow them until they are sent.
+    Delivery is asynchronous: creating returns 202 and the status moves
+    queued -> sending -> sent, or retrying -> failed, or cancelled.
+paths:
+  /api/v1/notifications:
+    post:
+      summary: Create one notification
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NewNotification' }
+            example: { to: "+905551234567", channel: sms, content: "Your code is 4821", priority: high }
+      responses:
+        '202':
+          description: Accepted. Replays of the same Idempotency-Key return this same body and the header Idempotent-Replayed true.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Notification' } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+    get:
+      summary: List notifications, newest first
+      parameters:
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/Status' } }
+        - { name: channel, in: query, schema: { $ref: '#/components/schemas/Channel' } }
+        - { name: batchId, in: query, schema: { type: string, format: uuid } }
+        - { name: from, in: query, description: created at or after (RFC 3339), schema: { type: string, format: date-time } }
+        - { name: to, in: query, description: created before (RFC 3339), schema: { type: string, format: date-time } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: cursor, in: query, description: nextCursor from the previous page, schema: { type: string } }
+      responses:
+        '200':
+          description: One page. nextCursor is absent on the last page.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Notification' } }
+                  nextCursor: { type: string }
+        '400': { $ref: '#/components/responses/Error' }
+  /api/v1/notifications/batch:
+    post:
+      summary: Create up to 1000 notifications in one request (all or nothing)
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [notifications]
+              properties:
+                notifications:
+                  type: array
+                  minItems: 1
+                  maxItems: 1000
+                  items: { $ref: '#/components/schemas/NewNotification' }
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  batchId: { type: string, format: uuid }
+                  count: { type: integer }
+                  notificationIds: { type: array, items: { type: string, format: uuid } }
+        '400': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/v1/notifications/{id}:
+    get:
+      summary: Get one notification
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
+      responses:
+        '200':
+          description: The notification
+          content: { application/json: { schema: { $ref: '#/components/schemas/Notification' } } }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/notifications/{id}/cancel:
+    post:
+      summary: Cancel a notification that is still queued or retrying
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
+      responses:
+        '200':
+          description: Cancelled
+          content: { application/json: { schema: { $ref: '#/components/schemas/Notification' } } }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/batches/{id}:
+    get:
+      summary: Batch progress, as a count per status
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
+      responses:
+        '200':
+          description: Batch status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  batchId: { type: string, format: uuid }
+                  count: { type: integer }
+                  createdAt: { type: string, format: date-time }
+                  statuses: { type: object, additionalProperties: { type: integer } }
+        '404': { $ref: '#/components/responses/Error' }
+  /healthz:
+    get: { summary: Liveness, responses: { '200': { description: ok } } }
+  /readyz:
+    get:
+      summary: Readiness (checks the database)
+      responses: { '200': { description: ready }, '503': { description: database unreachable } }
+  /metrics:
+    get: { summary: Prometheus metrics, responses: { '200': { description: Prometheus text format } } }
+components:
+  parameters:
+    Id: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Same key and same body returns the first result instead of creating again. Same key with another body is a 422.
+      schema: { type: string, maxLength: 200 }
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string }
+              details: { type: array, items: { type: string } }
+  schemas:
+    Channel: { type: string, enum: [sms, email, push] }
+    Priority: { type: string, enum: [high, normal, low], default: normal }
+    Status: { type: string, enum: [queued, sending, retrying, sent, failed, cancelled] }
+    NewNotification:
+      type: object
+      required: [to, channel, content]
+      properties:
+        to: { type: string, description: "sms: E.164 number; email: address; push: device token" }
+        channel: { $ref: '#/components/schemas/Channel' }
+        content: { type: string, description: "limits in characters: sms 160, push 256, email 10000" }
+        priority: { $ref: '#/components/schemas/Priority' }
+        scheduledAt: { type: string, format: date-time, description: Do not send before this time }
+    Notification:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        batchId: { type: string, format: uuid }
+        channel: { $ref: '#/components/schemas/Channel' }
+        to: { type: string }
+        content: { type: string }
+        priority: { $ref: '#/components/schemas/Priority' }
+        status: { $ref: '#/components/schemas/Status' }
+        attempts: { type: integer }
+        nextAttemptAt: { type: string, format: date-time }
+        scheduledAt: { type: string, format: date-time }
+        providerMessageId: { type: string }
+        lastError: { type: string }
+        correlationId: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        sentAt: { type: string, format: date-time }
