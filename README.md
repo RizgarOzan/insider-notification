@@ -95,11 +95,13 @@ Logs are JSON through `log/slog`. Each request gets an `X-Correlation-ID` (yours
 - **Polling**, every 200 ms when idle. `LISTEN/NOTIFY` would cut idle latency; I did not need it.
 - **Tracing, WebSocket and templates** are not built. Polling `GET /notifications/{id}` is the status view.
 - The Swagger page loads its JavaScript from a CDN, so `/docs` needs internet; `/openapi.yaml` does not.
-- `docker compose` was not run on the machine this was written on (no Docker there). The same flow was run with the binaries against a local Postgres, and CI runs the tests on a Postgres service. Run `docker compose up --build` once before relying on the compose file.
+- `docker compose` could not be run on the machine this was written on (no Docker there). The CI workflow runs `docker compose up --build`, the curl examples, `make test` and the benchmark on every push, so that flow is checked there.
 
-## Measured
+## I measured it
 
 1000 SMS in one batch call took 0.12 s to accept. With a healthy mock provider all 1000 reached `sent` in 10.3 s, one provider call each, which is the channel limit (100 per second) doing its job. Against a mock that failed 20% of requests with a 503, all 1000 also reached `sent`, in about 50 s, mostly the retry waits, with 1236 provider calls (earlier run). Both on one machine with a local Postgres, no Docker.
+
+To reproduce the healthy-provider number against a running `docker compose up --build`: `scripts/bench.sh` (needs `curl`, `jq`, `bc`). It prints the accept time and the time until all 1000 are `sent`; the channel limit means it cannot be under 10 s. `scripts/smoke.sh` runs the curl examples above and checks the answers. CI runs both.
 
 ## Layout
 

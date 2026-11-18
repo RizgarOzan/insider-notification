@@ -1,0 +1,45 @@
+name: e2e
+on: [push, pull_request]
+jobs:
+  compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: go.mod version works with golang:1.27-alpine
+        run: |
+          want=$(awk '/^go /{print $2}' go.mod)
+          have=$(docker run --rm golang:1.27-alpine go env GOVERSION | sed 's/^go//')
+          echo "go.mod wants $want, image has $have"
+          [ "$(printf '%s\n%s\n' "$want" "$have" | sort -V | head -n1)" = "$want" ]
+          docker run --rm -e GOTOOLCHAIN=local -v "$PWD":/src -w /src golang:1.27-alpine go build ./...
+
+      - name: docker compose up
+        run: docker compose up --build -d
+
+      - name: health check
+        run: |
+          for i in $(seq 1 60); do
+            curl -fsS localhost:8080/readyz && exit 0
+            sleep 2
+          done
+          docker compose logs
+          exit 1
+
+      - name: README curl examples
+        run: scripts/smoke.sh
+
+      - name: integration tests (make test)
+        run: make test
+
+      - name: benchmark from the README
+        run: scripts/bench.sh
+
+      - name: logs on failure
+        if: failure()
+        run: docker compose logs --tail 200
+
+      - name: docker compose down
+        if: always()
+        run: docker compose down -v
