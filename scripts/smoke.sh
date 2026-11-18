@@ -47,5 +47,6 @@ for _ in $(seq 1 30); do
 done
 [ "$SENT" = 3 ] || fail "batch $BID has $SENT sent, expected 3"
 
-curl -fsS "$BASE/metrics" | grep -q notifications_processed_total || fail metrics
+METRICS=$(curl -fsS "$BASE/metrics")
+grep -q notifications_processed_total <<<"$METRICS" || fail metrics
 echo "smoke ok"
