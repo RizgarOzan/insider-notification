@@ -3,6 +3,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"math/rand/v2"
 	"sync"
@@ -139,26 +140,18 @@ func (p *Pool) channelLoop(ctx context.Context, ch domain.Channel) {
 func (p *Pool) deliver(ctx context.Context, limiter *rate.Limiter, pausedUntil *atomic.Int64, n domain.Notification) {
 	log := p.log.With("channel", n.Channel, "notification_id", n.ID, "correlation_id", n.CorrelationID, "attempt", n.Attempts)
 
-	// The limit applies to provider calls, not to claiming. If we are shutting down, give the row
-	// back with its attempt refunded; nothing was sent.
-	// A 429 that came back while this row waited for its turn pauses it too.
+	// The limit applies to provider calls, not to claiming. If we are shutting down, give the row back with
+	// its attempt refunded; nothing was sent. The same goes for a 429 that arrived while this row
+	// waited for its turn: Retry-After can be far longer than the lease, so it is not held through the pause.
 	err := limiter.Wait(ctx)
-	for err == nil {
-		wait := time.Until(time.Unix(0, pausedUntil.Load()))
-		if wait <= 0 {
-			break
-		}
-		sleep(ctx, wait)
-		err = ctx.Err()
-		if err == nil {
-			err = limiter.Wait(ctx)
-		}
+	if err == nil && time.Now().UnixNano() < pausedUntil.Load() {
+		err = errChannelPaused
 	}
 	if err != nil {
 		relCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		if err := p.store.Release(relCtx, n); err != nil {
-			log.Warn("could not release row on shutdown; the reaper will", "error", err)
+			log.Warn("could not release row; the reaper will", "error", err)
 		}
 		return
 	}
@@ -214,6 +207,8 @@ func (p *Pool) deliver(ctx context.Context, limiter *rate.Limiter, pausedUntil *
 		log.Info("delivery attempt", "outcome", res.Outcome, "status_code", code, "duration_ms", took.Milliseconds())
 	}
 }
+
+var errChannelPaused = errors.New("channel paused by a 429")
 
 func sleep(ctx context.Context, d time.Duration) {
 	t := time.NewTimer(d)
