@@ -171,7 +171,9 @@ func (p *Pool) deliver(ctx context.Context, limiter *rate.Limiter, pausedUntil *
 			break
 		}
 		log.Warn("recording result failed, retrying", "error", err, "try", try)
-		time.Sleep(time.Duration(try) * 500 * time.Millisecond)
+		if try < 4 {
+			time.Sleep(time.Duration(try) * 500 * time.Millisecond)
+		}
 	}
 	switch {
 	case err != nil:
