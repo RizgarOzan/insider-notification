@@ -148,10 +148,21 @@ func (p *Pool) deliver(ctx context.Context, limiter *rate.Limiter, pausedUntil *
 		p.metrics.Delivered.WithLabelValues(string(n.Channel), label).Inc()
 	}
 
-	// Write the result even when ctx is cancelled: the message already went out.
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
-	applied, err := p.store.Finish(writeCtx, n, res)
+	// Write the result even when ctx is cancelled: the message already went out. A database
+	// hiccup gets a few retries, because losing the write means the lease expires and the
+	// message is sent again.
+	var applied bool
+	var err error
+	for try := 1; try <= 4; try++ {
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		applied, err = p.store.Finish(writeCtx, n, res)
+		cancel()
+		if err == nil {
+			break
+		}
+		log.Warn("recording result failed, retrying", "error", err, "try", try)
+		time.Sleep(time.Duration(try) * 500 * time.Millisecond)
+	}
 	switch {
 	case err != nil:
 		log.Error("could not record result", "error", err, "outcome", res.Outcome)
