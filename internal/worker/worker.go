@@ -80,9 +80,9 @@ func (p *Pool) reapLoop(ctx context.Context) {
 }
 
 func (p *Pool) channelLoop(ctx context.Context, ch domain.Channel) {
-	// Burst equals the rate: a quiet second can be followed by one second of full speed, never more
-	// than RatePerSec messages in any one-second window.
-	limiter := rate.NewLimiter(rate.Limit(p.cfg.RatePerSec), p.cfg.RatePerSec)
+	// Burst of 1 spaces sends 10ms apart at 100/sec. A bigger burst would let a closed
+	// one-second window hold burst + rate sends, which breaks "at most 100 per second".
+	limiter := rate.NewLimiter(rate.Limit(p.cfg.RatePerSec), 1)
 	var pausedUntil atomic.Int64 // unix nanos; set when the provider answers 429
 	log := p.log.With("channel", ch)
 

@@ -98,9 +98,10 @@ func Middleware(log *slog.Logger, m *Metrics, next http.Handler) http.Handler {
 		w.Header().Set("X-Correlation-ID", id)
 		sw := &statusWriter{ResponseWriter: w, code: http.StatusOK}
 		start := time.Now()
-		next.ServeHTTP(sw, r.WithContext(WithCorrelationID(r.Context(), id)))
+		req := r.WithContext(WithCorrelationID(r.Context(), id))
+		next.ServeHTTP(sw, req)
 
-		route := r.Pattern // set by ServeMux; unknown paths have none, which keeps label cardinality bounded
+		route := req.Pattern // set by ServeMux; unknown paths have none, which keeps label cardinality bounded
 		if route == "" {
 			route = "unmatched"
 		}
