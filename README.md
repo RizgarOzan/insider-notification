@@ -92,6 +92,7 @@ Logs are JSON through `log/slog`. Each request gets an `X-Correlation-ID` (yours
 
 - **At least once, not exactly once.** If the provider accepts a message but the response is lost, the retry sends it again. The notification id goes out as `Idempotency-Key` so a provider that supports it can drop the duplicate.
 - **One process.** The 100 per second limit is in memory. Two replicas would allow 200. Running more than one needs a shared limiter (Redis or a token table). The claim query itself is safe with many workers; the tests run two competing pools.
+- **Assumptions where the brief is silent.** No authentication or per-customer scoping (the brief has no users); all clients see all notifications. Idempotency is opt-in through the `Idempotency-Key` header, not derived from the body, because two identical bodies can be two legitimate messages. The 100 per second limit is per channel and per process (see above). `go test ./...` without a database skips the integration tests; use `make test`.
 - **Polling**, every 200 ms when idle. `LISTEN/NOTIFY` would cut idle latency; I did not need it.
 - **Tracing, WebSocket and templates** are not built. Polling `GET /notifications/{id}` is the status view.
 - The Swagger page loads its JavaScript from a CDN, so `/docs` needs internet; `/openapi.yaml` does not.
