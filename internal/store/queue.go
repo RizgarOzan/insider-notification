@@ -24,7 +24,8 @@ func (s *Store) Claim(ctx context.Context, channel domain.Channel, limit int, le
 	}
 	var out []domain.Notification
 	for _, p := range domain.Priorities {
-		got, err := s.claimPriority(ctx, channel, p, shares[p], lease)
+		n := min(shares[p], limit-len(out))
+		got, err := s.claimPriority(ctx, channel, p, n, lease)
 		if err != nil {
 			return out, err
 		}
@@ -133,6 +134,16 @@ func (s *Store) Finish(ctx context.Context, n domain.Notification, r Result) (ap
 		return false, err
 	}
 	return true, tx.Commit(ctx)
+}
+
+// Release hands a claimed row back untouched (shutdown before the send): the attempt counted at
+// claim time is refunded and the row is due again right away. Only the lease holder can do it.
+func (s *Store) Release(ctx context.Context, n domain.Notification) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE notifications SET status = 'retrying', attempts = attempts - 1, next_attempt_at = now(),
+			locked_until = NULL, lease_token = NULL, updated_at = now()
+		WHERE id = $1 AND lease_token = $2 AND status = 'sending'`, n.ID, n.LeaseToken)
+	return err
 }
 
 // ReapExpired handles rows whose worker died: the lease ran out while still "sending".

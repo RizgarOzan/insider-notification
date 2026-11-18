@@ -99,7 +99,7 @@ Logs are JSON through `log/slog`. Each request gets an `X-Correlation-ID` (yours
 
 ## Measured
 
-1000 notifications in one batch call took 0.26 s to accept. All 1000 reached `sent` through a mock provider that failed 20% of requests with a 503, in about 50 s, mostly the retry waits. 1236 provider calls were made for 1000 messages.  With a healthy provider the floor is the channel limit: 1000 SMS cannot go out in under 10 s.
+1000 SMS in one batch call took 0.12 s to accept. With a healthy mock provider all 1000 reached `sent` in 10.3 s, one provider call each, which is the channel limit (100 per second) doing its job. Against a mock that failed 20% of requests with a 503, all 1000 also reached `sent`, in about 50 s, mostly the retry waits, with 1236 provider calls (earlier run). Both on one machine with a local Postgres, no Docker.
 
 ## Layout
 

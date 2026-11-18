@@ -96,8 +96,11 @@ func (p *Pool) channelLoop(ctx context.Context, ch domain.Channel) {
 			if ctx.Err() == nil {
 				log.Error("claim failed", "error", err)
 			}
-			sleep(ctx, p.cfg.PollInterval)
-			continue
+			// Rows claimed before the error already carry a lease and a counted attempt: deliver them.
+			if len(batch) == 0 {
+				sleep(ctx, p.cfg.PollInterval)
+				continue
+			}
 		}
 		if len(batch) == 0 {
 			sleep(ctx, p.cfg.PollInterval)
@@ -119,13 +122,20 @@ func (p *Pool) channelLoop(ctx context.Context, ch domain.Channel) {
 func (p *Pool) deliver(ctx context.Context, limiter *rate.Limiter, pausedUntil *atomic.Int64, n domain.Notification) {
 	log := p.log.With("channel", n.Channel, "notification_id", n.ID, "correlation_id", n.CorrelationID, "attempt", n.Attempts)
 
-	// The limit applies to provider calls, not to claiming. If we are shutting down, the row keeps
-	// its lease and the reaper hands it back; nothing was sent, so nothing is lost.
+	// The limit applies to provider calls, not to claiming. If we are shutting down, give the row
+	// back with its attempt refunded; nothing was sent.
 	if err := limiter.Wait(ctx); err != nil {
+		relCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := p.store.Release(relCtx, n); err != nil {
+			log.Warn("could not release row on shutdown; the reaper will", "error", err)
+		}
 		return
 	}
 
-	sendCtx := observ.WithCorrelationID(ctx, n.CorrelationID)
+	// Sending is not tied to ctx: a request aborted by shutdown may already have reached the provider,
+	// and counting that as a failed attempt would risk a duplicate. The client has its own timeout.
+	sendCtx := observ.WithCorrelationID(context.WithoutCancel(ctx), n.CorrelationID)
 	start := time.Now()
 	msgID, code, sendErr := p.sender.Send(sendCtx, n)
 	took := time.Since(start)

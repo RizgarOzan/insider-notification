@@ -148,6 +148,9 @@ func (n NewNotification) Validate() []string {
 	if strings.TrimSpace(n.Content) == "" {
 		problems = append(problems, "content is required")
 	}
+	if strings.ContainsRune(n.Recipient, 0) || strings.ContainsRune(n.Content, 0) {
+		problems = append(problems, "to and content must not contain NUL characters")
+	}
 	if chErr != nil {
 		return problems
 	}

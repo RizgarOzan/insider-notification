@@ -89,10 +89,11 @@ func run() error {
 	log.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
+	shutErr := srv.Shutdown(shutdownCtx)
+	<-workersDone // always wait: in-flight results must be written before the pool closes
+	if shutErr != nil && !errors.Is(shutErr, http.ErrServerClosed) {
+		return shutErr
 	}
-	<-workersDone
 	return nil
 }
 
