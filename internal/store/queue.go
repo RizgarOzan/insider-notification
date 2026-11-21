@@ -10,17 +10,29 @@ import (
 	"insider-notification/internal/domain"
 )
 
+// turnOrder says which priority each claimed slot belongs to: 6 high, 3 normal, 1 low in every 10.
+var turnOrder = [10]domain.Priority{
+	domain.High, domain.Normal, domain.High, domain.High, domain.Normal,
+	domain.High, domain.Low, domain.High, domain.Normal, domain.High,
+}
+
 // Claim leases up to limit due notifications of one channel. Each priority gets a weighted share
 // (60% high, 30% normal, 10% low); slots a priority does not fill go to the next one down the list,
 // so low is never starved and nothing sits idle while work exists.
 //
+// The share is counted across calls, not inside one. A worker with one free slot calls Claim(1)
+// over and over, and a share worked out per call would round low down to nothing every time.
+//
 // FOR UPDATE SKIP LOCKED lets several workers run the same query without waiting on each other
 // or taking the same row. The lease (locked_until + lease_token) is written in the same statement.
 func (s *Store) Claim(ctx context.Context, channel domain.Channel, limit int, lease time.Duration) ([]domain.Notification, error) {
-	shares := map[domain.Priority]int{
-		domain.High:   (limit*6 + 9) / 10,
-		domain.Normal: (limit*3 + 9) / 10,
-		domain.Low:    limit / 10,
+	s.mu.Lock()
+	start := s.turn[channel]
+	s.turn[channel] = (start + limit) % len(turnOrder)
+	s.mu.Unlock()
+	shares := map[domain.Priority]int{}
+	for i := 0; i < limit; i++ {
+		shares[turnOrder[(start+i)%len(turnOrder)]]++
 	}
 	var out []domain.Notification
 	for _, p := range domain.Priorities {

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,9 +22,14 @@ import (
 
 type Store struct {
 	pool *pgxpool.Pool
+
+	mu   sync.Mutex
+	turn map[domain.Channel]int // where each channel is in turnOrder, see Claim
 }
 
-func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
+func New(pool *pgxpool.Pool) *Store {
+	return &Store{pool: pool, turn: map[domain.Channel]int{}}
+}
 
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 

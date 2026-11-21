@@ -490,6 +490,44 @@ func TestPriorityOrder(t *testing.T) {
 	}
 }
 
+// With sends leaving one at a time the loop claims one row at a time. Low must still get its
+// turn while high has a backlog, not wait until high is empty.
+func TestLowNotStarvedBehindHighBacklog(t *testing.T) {
+	e := setup(t)
+	var items []domain.NewNotification
+	for i := 0; i < 300; i++ {
+		items = append(items, domain.NewNotification{Recipient: "+905551234567", Channel: "sms", Content: "high", Priority: "high"})
+	}
+	for i := 0; i < 30; i++ {
+		items = append(items, domain.NewNotification{Recipient: "+905551234567", Channel: "sms", Content: "low", Priority: "low"})
+	}
+	var res store.BatchResult
+	e.call(t, "POST", "/api/v1/notifications/batch", map[string]any{"notifications": items}, nil, &res)
+
+	f := newFake()
+	e.runWorkers(t, worker.Config{RatePerSec: 100}, f)
+	deadline := time.Now().Add(20 * time.Second)
+	for e.countStatus(t, "sent") < 330 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.order) != 330 {
+		t.Fatalf("sent %d of 330", len(f.order))
+	}
+	// One slot in ten is low's, so about 20 of the first 200 sends. Before the fix it was 2.
+	low := 0
+	for _, c := range f.order[:200] {
+		if c == "low" {
+			low++
+		}
+	}
+	if low < 10 {
+		t.Fatalf("only %d low messages in the first 200 sends", low)
+	}
+}
+
 func TestRetryClassification(t *testing.T) {
 	e := setup(t)
 	f := newFake()
