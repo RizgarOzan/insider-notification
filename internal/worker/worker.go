@@ -165,20 +165,25 @@ func (p *Pool) deliver(ctx context.Context, limiter *rate.Limiter, pausedUntil *
 	p.metrics.ProviderTime.WithLabelValues(string(n.Channel)).Observe(took.Seconds())
 
 	res := store.Result{StatusCode: code, ProviderID: msgID, Duration: took}
+	label := "sent"
 	if sendErr == nil {
 		res.Outcome = domain.StatusSent
-		p.metrics.Delivered.WithLabelValues(string(n.Channel), "sent").Inc()
 	} else {
 		o := domain.Decide(sendErr, n.Attempts, p.cfg.MaxAttempts, p.rnd)
 		res.Outcome, res.RefundTry, res.RetryAfter, res.Error = o.Status, o.RefundTry, o.RetryAfter, sendErr.Error()
 		if o.ChannelWait > 0 {
 			pausedUntil.Store(time.Now().Add(o.ChannelWait).UnixNano())
 		}
-		label := "retry"
-		if o.Status == domain.StatusFailed {
+		// A 429 costs no attempt, so on its own it would keep a message alive forever, and a
+		// message the provider always answers with 429 would pause its channel every time.
+		if o.RefundTry && time.Since(dueSince(n)) > rateLimitGiveUp {
+			res.Outcome, res.RefundTry, res.RetryAfter = domain.StatusFailed, false, 0
+			res.Error = "rate limited for over " + rateLimitGiveUp.String() + ": " + res.Error
+		}
+		label = "retry"
+		if res.Outcome == domain.StatusFailed {
 			label = "failed"
 		}
-		p.metrics.Delivered.WithLabelValues(string(n.Channel), label).Inc()
 	}
 
 	// Write the result even when ctx is cancelled: the message already went out. A database
@@ -197,6 +202,8 @@ func (p *Pool) deliver(ctx context.Context, limiter *rate.Limiter, pausedUntil *
 			time.Sleep(time.Duration(try) * 500 * time.Millisecond)
 		}
 	}
+	// Counted here, after the write, so one provider call is one result: a dropped write is
+	// "dropped" and not also "sent".
 	switch {
 	case err != nil:
 		log.Error("could not record result", "error", err, "outcome", res.Outcome)
@@ -204,11 +211,23 @@ func (p *Pool) deliver(ctx context.Context, limiter *rate.Limiter, pausedUntil *
 		p.metrics.Delivered.WithLabelValues(string(n.Channel), "dropped").Inc()
 		log.Warn("result dropped: lease was lost", "outcome", res.Outcome)
 	default:
+		p.metrics.Delivered.WithLabelValues(string(n.Channel), label).Inc()
 		log.Info("delivery attempt", "outcome", res.Outcome, "status_code", code, "duration_ms", took.Milliseconds())
 	}
 }
 
 var errChannelPaused = errors.New("channel paused by a 429")
+
+// rateLimitGiveUp is how long a message may keep getting 429s before it is failed.
+const rateLimitGiveUp = time.Hour
+
+// dueSince is when the message was first meant to go out.
+func dueSince(n domain.Notification) time.Time {
+	if n.ScheduledAt != nil && n.ScheduledAt.After(n.CreatedAt) {
+		return *n.ScheduledAt
+	}
+	return n.CreatedAt
+}
 
 func sleep(ctx context.Context, d time.Duration) {
 	t := time.NewTimer(d)

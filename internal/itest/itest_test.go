@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -606,6 +607,60 @@ func TestRateLimitedResponseKeepsAttempts(t *testing.T) {
 	got := e.waitStatus(t, n.ID, domain.StatusSent)
 	if got.Attempts != 1 {
 		t.Fatalf("attempts after four 429s: %d, want 1", got.Attempts)
+	}
+}
+
+// 429s are free, but not forever: a message the provider has been refusing for over an hour fails.
+func TestRateLimitedForTooLongFails(t *testing.T) {
+	e := setup(t)
+	var n domain.Notification
+	e.call(t, "POST", "/api/v1/notifications", sms("always limited"), nil, &n)
+	if _, err := e.pool.Exec(context.Background(), `UPDATE notifications SET created_at = now() - interval '2 hours' WHERE id = $1`, n.ID); err != nil {
+		t.Fatal(err)
+	}
+	f := newFake()
+	f.script = func(domain.Notification) error {
+		return &domain.SendError{Kind: domain.KindRateLimited, StatusCode: 429, RetryAfter: time.Second, Err: fmt.Errorf("429")}
+	}
+	e.runWorkers(t, worker.Config{}, f)
+	got := e.waitStatus(t, n.ID, domain.StatusFailed)
+	if got.LastError == nil || !strings.Contains(*got.LastError, "rate limited for over") {
+		t.Fatalf("last error: %v", got.LastError)
+	}
+}
+
+// A send whose lease was taken over while it was in flight counts as dropped, not also as sent.
+func TestDroppedResultIsNotCountedAsSent(t *testing.T) {
+	e := setup(t)
+	var n domain.Notification
+	e.call(t, "POST", "/api/v1/notifications", sms("lease lost"), nil, &n)
+	f := newFake()
+	f.script = func(domain.Notification) error {
+		_, err := e.pool.Exec(context.Background(), `UPDATE notifications SET lease_token = gen_random_uuid() WHERE id = $1`, n.ID)
+		if err != nil {
+			t.Error(err)
+		}
+		return nil
+	}
+	e.runWorkers(t, worker.Config{}, f)
+
+	var body []byte
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		resp, err := http.Get(e.srv.URL + "/metrics")
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if bytes.Contains(body, []byte(`notifications_processed_total{channel="sms",result="dropped"} 1`)) {
+			break
+		}
+	}
+	if !bytes.Contains(body, []byte(`result="dropped"} 1`)) {
+		t.Fatal("dropped result was not counted")
+	}
+	if bytes.Contains(body, []byte(`notifications_processed_total{channel="sms",result="sent"}`)) {
+		t.Fatal("dropped result was also counted as sent")
 	}
 }
 
