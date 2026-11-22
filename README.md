@@ -64,7 +64,7 @@ client -> API -> INSERT (status queued) -> Postgres <- worker loop per channel -
 
 The API only writes a row. Workers (one loop per channel, in the same process) react to rows that are due. A status change is the event; there is no second system to keep in sync with the table.
 
-**Why a Postgres queue and not Kafka or Redis.** The state we must serve anyway (cancel, filtered list, batch progress) lives in a table. With a separate broker the queue and the table can disagree. With `SELECT ... FOR UPDATE SKIP LOCKED`, claiming a message and changing its status is one statement. The case's own ceiling is 100 messages per second per channel, which Postgres handles comfortably. I measured it instead of guessing (see below). If this ever needs tens of thousands per second, the move is an outbox table feeding Kafka while Postgres stays the source of truth.
+**Why a Postgres queue and not Kafka or Redis.** The state we must serve anyway (cancel, filtered list, batch progress) lives in a table. With a separate broker the queue and the table can disagree. With `SELECT ... FOR UPDATE SKIP LOCKED`, claiming a message and changing its status is one statement. The case's own ceiling is 100 messages per second per channel, which Postgres handles comfortably (numbers are under Measurements). If this ever needs tens of thousands per second, the move is an outbox table feeding Kafka while Postgres stays the source of truth.
 
 **Claiming.** Each channel loop claims up to 20 due rows. The claim sets `status = 'sending'`, bumps `attempts`, and writes a 30 second lease (`locked_until` plus a random `lease_token`). Priorities share the claimed slots 60/30/10 (high/normal/low), counted across claims because a worker with one free slot claims one row at a time. Spare slots flow down, so low is slowed but never starved.
 
@@ -93,14 +93,17 @@ Logs are JSON through `log/slog`. Each request gets an `X-Correlation-ID` (yours
 - **At least once, not exactly once.** If the provider accepts a message but the response is lost, the retry sends it again. The notification id goes out as `Idempotency-Key` so a provider that supports it can drop the duplicate.
 - **One process.** The 100 per second limit is in memory. Two replicas would allow 200. Running more than one needs a shared limiter (Redis or a token table). The claim query itself is safe with many workers; the tests run two competing pools.
 - **Assumptions where the brief is silent.** No authentication or per-customer scoping (the brief has no users); all clients see all notifications. Idempotency is opt-in through the `Idempotency-Key` header, not derived from the body, because two identical bodies can be two legitimate messages. The 100 per second limit is per channel and per process (see above). `go test ./...` without a database skips the integration tests; use `make test`.
+- **The lease is not renewed.** It is 30 seconds and a provider call times out after 10, so a send fits with room. If writing the result stalls past the lease, the reaper hands the row to another worker and the message can go out twice.
+- **No way to re-send a failed message.** `failed` is final. The client has to create a new notification.
+- **No queue latency metric.** Queue depth is exported; the time from "due" to "sent" is not.
 - **Polling**, every 200 ms when idle. `LISTEN/NOTIFY` would cut idle latency; I did not need it.
 - **Tracing, WebSocket and templates** are not built. Polling `GET /notifications/{id}` is the status view.
 - The Swagger page loads its JavaScript from a CDN, so `/docs` needs internet; `/openapi.yaml` does not.
 - `docker compose` could not be run on the machine this was written on (no Docker there). The CI workflow runs `docker compose up --build`, the curl examples, `make test` and the benchmark on every push, so that flow is checked there.
 
-## I measured it
+## Measurements
 
-1000 SMS in one batch call took 0.12 s to accept. With a healthy mock provider all 1000 reached `sent` in 10.3 s, one provider call each, which is the channel limit (100 per second) doing its job. Against a mock that failed 20% of requests with a 503, all 1000 also reached `sent`, in about 50 s, mostly the retry waits, with 1236 provider calls (earlier run). Both on one machine with a local Postgres, no Docker.
+1000 SMS in one batch call took between 0.1 and 0.2 s to accept. With a healthy mock provider all 1000 reached `sent` in 10.5 s, one provider call each, which is the channel limit (100 per second) doing its job. Against a mock that failed 20% of requests with a 503, all 1000 also reached `sent`, in about 40 s, mostly the retry waits, with 1252 provider calls. Both on one machine with a local Postgres, no Docker.
 
 To reproduce the healthy-provider number against a running `docker compose up --build`: `scripts/bench.sh` (needs `curl`, `jq`, `bc`). It prints the accept time and the time until all 1000 are `sent`; the channel limit means it cannot be under 10 s. `scripts/smoke.sh` runs the curl examples above and checks the answers. CI runs both.
 
